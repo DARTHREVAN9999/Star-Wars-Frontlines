@@ -271,7 +271,7 @@ const CLS={
  spec:{n:'SPECIALIST',hp:180,spd:4.6,dmg:145,rate:1.15,heat:15,cool:6,lock:3.5,bs:1200,ab:'',abCd:999,w:1.6,wn:'LONG-RANGE SNIPER',desc:'High-damage long-range precision rifle.'},
  officer:{n:'OFFICER',hp:180,spd:7,dmg:38,rate:2.2,heat:7.6,cool:12,lock:2.8,bs:150,ab:'',abCd:999,w:.4,wn:'BLASTER PISTOL',desc:'Fast and mobile. Overheats after about 8 seconds of continuous fire.'},
  rocket:{n:'ROCKET TROOPER',hp:200,spd:7,dmg:38,rate:2.2,heat:7.6,cool:12,lock:2.8,bs:150,ab:'',abCd:999,w:.4,wn:'BLASTER PISTOL',desc:'Slightly tougher than the Officer, with the same pistol and a powerful, steerable jetpack.'},
- commando:{n:'REPUBLIC COMMANDO',hp:300,spd:4.2,dmg:18,rate:5.8,heat:3.1,cool:12,lock:2.8,bs:210,ab:'',abCd:999,w:.95,wn:'DC-17M BLASTER RIFLE',desc:'Elite Republic support trooper using the modular DC-17m, with a fast close-range blaster, anti-armour grenades and a wide repulsor shockwave.'}
+ commando:{n:'REPUBLIC COMMANDO',hp:360,spd:4.2,dmg:18,rate:5.8,heat:3.1,cool:12,lock:2.8,bs:210,ab:'',abCd:999,w:.95,wn:'DC-17M BLASTER RIFLE',desc:'Elite Republic support trooper using the modular DC-17m, with a fast close-range blaster, anti-armour grenades and a wide repulsor shockwave.'}
 };
 
 const ABILS={
@@ -1744,11 +1744,18 @@ function canFire(u){
 
 function tryActivateAb(u,idx){
  if(!u||!u.alive)return;
- // Cannot use any ability while one is already active (except the active one itself is blocked by CD later)
- if(u.activeAb>=0)return;
  if(u.abCds[idx]>0)return; // this specific ability recharging
  const ab=ABILS[u.cls][idx];
  if(!ab)return;
+ // Damage-reduction / support buffs can always be activated alongside other abilities.
+ const isDrBuff=ab.type==='buff';
+ // Rocket Trooper: launcher and jetpack can be used together (fire rockets while flying).
+ const isRocketCombo=u.cls==='rocket'&&(
+  (idx===0&&(u.rocketMode==='boost'||u.rocketMode==='dash'||u.activeAb===1||u.activeAb===2))||
+  ((idx===1||idx===2)&&(u.altWep==='rocketLauncher'||u.activeAb===0))
+ );
+ // Block only when another exclusive channelled ability is already active.
+ if(u.activeAb>=0&&!isDrBuff&&!isRocketCombo)return;
  u.abilityNoticeName=ab.n;u.abilityNoticeT=2.4;
  // Instant support/pulse abilities apply immediately and start their cooldown.
  if(ab.type==='instant'){
@@ -1761,7 +1768,33 @@ function tryActivateAb(u,idx){
   if(u.isP)sfx('hitm');
   return;
  }
- // Channelled / duration abilities: lock out all other abilities until this one finishes
+ // Buffs (damage reduction etc.) run on their own timers and do not take the exclusive active slot.
+ if(isDrBuff){
+  startAbEffect(u,idx);
+  u.abCds[idx]=ab.cd;
+  if(u.isP)sfx('hitm');
+  return;
+ }
+ // Rocket launcher while already flying: equip launcher without cancelling flight / without stealing activeAb.
+ if(u.cls==='rocket'&&idx===0&&(u.rocketMode==='boost'||u.rocketMode==='dash'||u.activeAb===1||u.activeAb===2)){
+  startAbEffect(u,idx);
+  // Launcher stays until fired or duration; do not overwrite activeAb (keep jetpack as the channelled ability)
+  if(u.isP)sfx('hitm');
+  return;
+ }
+ // Jetpack while launcher is equipped: start flight without clearing launcher or starting launcher CD early.
+ if(u.cls==='rocket'&&(idx===1||idx===2)&&u.altWep==='rocketLauncher'){
+  // Switch exclusive channel to the jetpack so its duration is tracked; launcher stays until fired.
+  if(u.activeAb===0){u.activeAb=-1;u.abTime=0;}
+  u.activeAb=idx;
+  u.abTime=ab.dur;
+  startAbEffect(u,idx);
+  // Keep launcher visuals (startAbEffect for idx 1/2 does not clear altWep)
+  if(u.launcher)u.launcher.visible=true;
+  if(u.isP)sfx('hitm');
+  return;
+ }
+ // Channelled / duration abilities: lock out exclusive abilities until this one finishes
  u.activeAb=idx;
  u.abTime=ab.dur;
  startAbEffect(u,idx);
@@ -1858,14 +1891,35 @@ function startAbEffect(u,idx){
 }
 function endAbEffect(u){
  const idx=u.activeAb;
- if(idx<0)return;
+ if(idx<0){
+  // Allow explicit cleanup of launcher-only state (e.g. after firing) without an exclusive activeAb.
+  if(u.cls==='rocket'&&u.altWep==='rocketLauncher'){
+   u.altWep=null;
+   if(u.launcher)u.launcher.visible=false;
+   u.abCds[0]=ABILS.rocket[0].cd;
+  }
+  return;
+ }
  const ab=ABILS[u.cls][idx];
  u.abCds[idx]=ab.cd;
  u.activeAb=-1;
  u.abTime=0;
  if(u.cls==='commando'&&idx===0){if(u.antiArmorMesh)u.antiArmorMesh.visible=false;if(u._baseMuz){u.muz=u._baseMuz;u._baseMuz=null}u.antiArmorAmmo=0;}
- if(u.altWep==='sentry')unequipSentryGun(u);if(u.altWep){u.altWep=null;u.vanguardAmmo=0;u.sentryCharge=0;u.sentrySpin=0;}
- if(u.cls==='rocket'){u.rocketMode='coast';u.rocketFlightT=0;u.rocketLeanX=0;u.rocketLeanZ=0;}
+ // Clear weapon-based alt loadouts, but do not cancel rocket jetpack flight when only the launcher ends.
+ if(u.altWep==='sentry')unequipSentryGun(u);
+ if(u.altWep==='vanguard'||u.altWep==='sentry'||u.altWep==='infil'||u.altWep==='antiArmor'){
+  u.altWep=null;u.vanguardAmmo=0;u.sentryCharge=0;u.sentrySpin=0;
+ }
+ if(u.cls==='rocket'){
+  if(idx===0){
+   // Ending the launcher: unequip it, leave flight alone.
+   u.altWep=null;
+   if(u.launcher)u.launcher.visible=false;
+  }else if(idx===1||idx===2){
+   // Ending jetpack: stop powered flight, leave launcher equipped if present.
+   u.rocketMode='coast';u.rocketFlightT=0;u.rocketLeanX=0;u.rocketLeanZ=0;
+  }
+ }
  if(u.shieldMesh){scene.remove(u.shieldMesh);u.shieldMesh=null;}u.shieldHP=0;
  // note: turret keeps living for its own life timer
  // scan/toughen/infil timers continue independently until they expire
@@ -2139,12 +2193,16 @@ function fireRocketProjectile(u,d){
  else if(player&&Math.hypot(u.x-player.x,u.z-player.z)<55)sfx('blaster');
 }
 function detonateRocket(p,projectile,directTarget=null,profile=null){
- const radius=profile&&profile.radius?profile.radius:9.2,origin=p.clone(),team=projectile.team,owner=projectile.own;
+ // Rocket Trooper plasma rockets get a larger blast radius and higher damage than the default.
+ // Commando anti-armor grenades keep their own profile radius when provided.
+ const isAntiArmor=!!(profile&&profile.antiArmor);
+ const radius=profile&&profile.radius?profile.radius:(isAntiArmor?12.0:14.5);
+ const origin=p.clone(),team=projectile.team,owner=projectile.own;
  units.forEach(t=>{
   if(!t.alive||t.team===team)return;
   const dx=t.x-origin.x,dy=(t.y+1.05)-origin.y,dz=t.z-origin.z;
   const dist=Math.hypot(dx,dy,dz),inBlast=dist<=radius;
-  if(profile&&profile.antiArmor){
+  if(isAntiArmor){
    // Test the actual shield/turret position, not just the owner's position.
    if(t.shieldMesh&&t.shieldHP>0){
     const shieldDist=t.shieldMesh.position.distanceTo(origin);
@@ -2165,10 +2223,13 @@ function detonateRocket(p,projectile,directTarget=null,profile=null){
   }
   if(!inBlast||!losClear(origin.x,origin.z,t.x,t.z))return;
   const falloff=1-dist/radius;
-  const damage=profile&&profile.antiArmor?Math.round(32+118*falloff+(t===directTarget?95:0)):Math.round(24+74*falloff+(t===directTarget?65:0));
+  // Rocket Trooper: higher direct + splash damage. Commando anti-armor keeps its prior profile.
+  const damage=isAntiArmor
+   ?Math.round(32+118*falloff+(t===directTarget?95:0))
+   :Math.round(48+135*falloff+(t===directTarget?110:0));
   hitUnit(t,damage,owner,null,false);
  });
- if(profile&&profile.antiArmor){
+ if(isAntiArmor){
   // Vehicle damage is supported for combat vehicles registered with a team and hp/health value.
   // This HTML build currently has only decorative landing craft/capital ships, not active vehicle units.
   const candidates=[...(Array.isArray(window.combatVehicles)?window.combatVehicles:[]),...(Array.isArray(window.vehicles)?window.vehicles:[]),...(Array.isArray(gunships)?gunships:[]),...(Array.isArray(ships)?ships:[])];
@@ -2184,27 +2245,30 @@ function detonateRocket(p,projectile,directTarget=null,profile=null){
    if(ud[hpKey]<=0){ud.destroyed=true;if(vehicle.visible!==undefined)vehicle.visible=false;}
   });
  }
- // Brief orange fireball followed by spreading brown-orange dust and glowing embers.
- const flash=new THREE.Mesh(new THREE.SphereGeometry(.62,14,10),new THREE.MeshBasicMaterial({color:0xff6920,transparent:true,opacity:.98,depthWrite:false}));
- flash.position.copy(origin);scene.add(flash);parts.push({m:flash,v:new THREE.Vector3(0,.25,0),t:.42,max:.42,g:0,grow:true});
- const hotCore=new THREE.Mesh(new THREE.SphereGeometry(.34,12,9),new THREE.MeshBasicMaterial({color:0xffd078,transparent:true,opacity:.98,depthWrite:false}));
- hotCore.position.copy(origin);scene.add(hotCore);parts.push({m:hotCore,v:new THREE.Vector3(0,1.6,0),t:.30,max:.30,g:0,grow:true});
+ // Bigger fireball / shock ring for Rocket Trooper rockets; anti-armor keeps the original scale.
+ const visScale=isAntiArmor?1:1.55;
+ const flash=new THREE.Mesh(new THREE.SphereGeometry(.62*visScale,14,10),new THREE.MeshBasicMaterial({color:0xff6920,transparent:true,opacity:.98,depthWrite:false}));
+ flash.position.copy(origin);scene.add(flash);parts.push({m:flash,v:new THREE.Vector3(0,.25,0),t:.42*visScale,max:.42*visScale,g:0,grow:true});
+ const hotCore=new THREE.Mesh(new THREE.SphereGeometry(.34*visScale,12,9),new THREE.MeshBasicMaterial({color:0xffd078,transparent:true,opacity:.98,depthWrite:false}));
+ hotCore.position.copy(origin);scene.add(hotCore);parts.push({m:hotCore,v:new THREE.Vector3(0,1.6,0),t:.30*visScale,max:.30*visScale,g:0,grow:true});
  // A bright expanding orange ground ring makes the impact readable even at a distance.
- const shockRing=new THREE.Mesh(new THREE.TorusGeometry(.62,.095,8,28),new THREE.MeshBasicMaterial({color:0xff8a32,transparent:true,opacity:.92,depthWrite:false}));
+ const shockRing=new THREE.Mesh(new THREE.TorusGeometry(.62*visScale,.095*visScale,8,28),new THREE.MeshBasicMaterial({color:0xff8a32,transparent:true,opacity:.92,depthWrite:false}));
  shockRing.rotation.x=Math.PI/2;shockRing.position.copy(origin);shockRing.position.y=Math.max(origin.y,gh(origin.x,origin.z)+.12);scene.add(shockRing);
- parts.push({m:shockRing,v:new THREE.Vector3(0,.12,0),t:.48,max:.48,g:0,grow:true});
+ parts.push({m:shockRing,v:new THREE.Vector3(0,.12,0),t:.48*visScale,max:.48*visScale,g:0,grow:true});
  const dustCols=[0x55483d,0x6a5848,0x80634b,0x9a6745,0xb66b3b,0xc47a43];
- for(let i=0;i<22;i++){
+ const dustCount=isAntiArmor?22:36;
+ for(let i=0;i<dustCount;i++){
   const m=new THREE.Mesh(new THREE.SphereGeometry(1,8,6),new THREE.MeshLambertMaterial({color:dustCols[i%dustCols.length],transparent:true,opacity:.84,depthWrite:false}));
-  m.position.copy(origin).add(new THREE.Vector3(rnd(-.55,.55),rnd(-.25,.55),rnd(-.55,.55)));
-  const sc=rnd(.34,.78);m.scale.set(sc,sc*rnd(.72,1.2),sc);
+  m.position.copy(origin).add(new THREE.Vector3(rnd(-.55,.55)*visScale,rnd(-.25,.55)*visScale,rnd(-.55,.55)*visScale));
+  const sc=rnd(.34,.78)*visScale;m.scale.set(sc,sc*rnd(.72,1.2),sc);
   scene.add(m);
-  const v=new THREE.Vector3(rnd(-1,1)*7,rnd(2.2,6.5),rnd(-1,1)*7);
-  parts.push({m,v,t:1.12,max:1.12,g:-3.4});
+  const spread=isAntiArmor?7:11;
+  const v=new THREE.Vector3(rnd(-1,1)*spread,rnd(2.2,6.5)*visScale,rnd(-1,1)*spread);
+  parts.push({m,v,t:1.12*visScale,max:1.12*visScale,g:-3.4});
  }
  // Sparks are orange for both factions; the missile itself remains entirely black.
- burst(origin,0xff9638,34,11,.15);
- if(player&&Math.hypot(origin.x-player.x,origin.z-player.z)<42)shk=Math.max(shk,.22);
+ burst(origin,0xff9638,isAntiArmor?34:52,isAntiArmor?11:16,.15*visScale);
+ if(player&&Math.hypot(origin.x-player.x,origin.z-player.z)<(isAntiArmor?42:58))shk=Math.max(shk,isAntiArmor?.22:.38);
  sfx('boom');
 }
 function updateRocketProjectiles(dt){
@@ -2247,7 +2311,7 @@ function fireAntiArmorGrenade(u,d){
  }
  shell.position.copy(start).addScaledVector(dir,.24);
  shell.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,-1),dir);scene.add(shell);
- antiArmorProjectiles.push({mesh:shell,v:dir.multiplyScalar(105),gravity:.4,life:3.5,own:u,team:u.team,color:0xff9638,trail:0});
+ antiArmorProjectiles.push({mesh:shell,v:dir.multiplyScalar(88),gravity:16,life:3.5,own:u,team:u.team,color:0xff9638,trail:0});
  u.fireCd=.72;u.sinceFire=0;u.wepFlash=.10;u.antiArmorAmmo=Math.max(0,u.antiArmorAmmo-1);
  if(u.isP){sfx('blaster');if(S.shake)shk=Math.max(shk,.09)}
  else if(player&&Math.hypot(u.x-player.x,u.z-player.z)<55)sfx('blaster');
@@ -2608,7 +2672,7 @@ function fireScanDart(u,d){
  m.position.copy(origin);
  scene.add(m);
  if(!window.scanDarts)window.scanDarts=[];
- window.scanDarts.push({m,v:dir.clone().multiplyScalar(55),life:2.5,own:u,team:u.team});
+ window.scanDarts.push({m,v:dir.clone().multiplyScalar(95),life:3.2,own:u,team:u.team});
  if(u.isP)sfx('blaster');
 }
 function updateScanDarts(dt){
@@ -2616,7 +2680,7 @@ function updateScanDarts(dt){
  for(let i=window.scanDarts.length-1;i>=0;i--){
   const d=window.scanDarts[i];
   d.m.position.addScaledVector(d.v,dt);
-  d.v.y-=8*dt;
+  d.v.y-=5.5*dt;
   d.life-=dt;
   const hitGround=d.m.position.y<gh(d.m.position.x,d.m.position.z)+0.15;
   let hitUnit=false;
@@ -2655,9 +2719,14 @@ function fire(u,d){
  // The commando's active DC-17m anti-armour configuration fires one of its three grenade rounds.
  if(u.cls==='commando'&&u.altWep==='antiArmor'){fireAntiArmorGrenade(u,d);return;}
  // The Rocket Trooper launcher is single-shot: equip with ability 1, then left-click once.
+ // Can be fired while jetpack is active — only the launcher is consumed, flight continues.
  if(u.cls==='rocket'&&u.altWep==='rocketLauncher'){
   fireRocketProjectile(u,d);
-  endAbEffect(u);
+  u.altWep=null;
+  if(u.launcher)u.launcher.visible=false;
+  u.abCds[0]=ABILS.rocket[0].cd;
+  // If the exclusive active ability was the launcher itself, clear that channel; leave jetpack alone.
+  if(u.activeAb===0){u.activeAb=-1;u.abTime=0;}
   return;
  }
  // Scan Dart: next shot launches a dart instead of a normal bolt
@@ -2671,9 +2740,9 @@ function fire(u,d){
  }
  let c=CLS[u.cls];
  let rate=c.rate,dmg=c.dmg,heat=c.heat;
- if(u.altWep==='vanguard'){rate=5.5;dmg=55;heat=6;u.vanguardAmmo--;if(u.vanguardAmmo<=0)endAbEffect(u);}
+ if(u.altWep==='vanguard'){rate=14;dmg=18;heat=14;u.vanguardAmmo--;if(u.vanguardAmmo<=0)endAbEffect(u);}
  else if(u.altWep==='sentry'){rate=22;dmg=16;heat=0.9;u.sentrySpin+=0.5;}
- else if(u.altWep==='infil'){rate=4.5;dmg=42;heat=5;}
+ else if(u.altWep==='infil'){rate=4.5;dmg=28;heat=5;}
  u.fireCd=1/rate;u.sinceFire=0;u.wepFlash=.06;u.heat+=heat;
  if(u.heat>=100){u.heat=100;u.overheat=true;u.lock=c.lock;if(u.isP)sfx('ovh')}
  const b=bolts.find(b=>!b.on);if(!b)return;
@@ -2688,7 +2757,7 @@ function fire(u,d){
  b.on=true;b.m.visible=true;b.m.material=BM[u.team];
  b.m.position.copy(muzzle);
  b.m.quaternion.setFromUnitVectors(ZA,dv);b.v.copy(dv).multiplyScalar(u.cls==='spec'?1600:c.bs);b.life=u.cls==='spec'?2.4:1.4;b.own=u;
- b.dmg=dmg*(u.focus?2:1);b.cls=u.cls;b.ox=u.x;b.oy=u.y;b.oz=u.z;u.focus=false;
+ b.dmg=dmg*(u.focus?2:1);b.cls=u.cls;b.altWep=u.altWep||null;b.ox=u.x;b.oy=u.y;b.oz=u.z;u.focus=false;
  if(u.isP){sfx('blaster');if(S.shake)shk=Math.max(shk,c.dmg>50?.12:.05)}
  else if(player&&Math.hypot(u.x-player.x,u.z-player.z)<45)sfx('blaster');
 }
@@ -2763,13 +2832,19 @@ function awardKillAndAssists(victim,killer,headshotKill=false){
  victim.damageLog=[];
 }
 function hitUnit(u,a,src,bolt,headshot){
- // Distance falloff: infinite range but less dmg far away. Spec/Heavy keep more damage at range.
+ // Distance falloff: smaller / pistol-class weapons lose damage quickly at range.
+ // Specialist sniper and Heavy keep usable damage far away; infiltration carbine and officer pistols force close fights.
  if(bolt&&bolt.ox!=null){
   const dist=Math.hypot(u.x-bolt.ox,u.z-bolt.oz);
   let keep=1;
-  if(bolt.cls==='spec')keep=Math.max(0.55,1-dist/220);
-  else if(bolt.cls==='heavy')keep=Math.max(0.45,1-dist/180);
-  else keep=Math.max(0.25,1-dist/120);
+  const wep=bolt.altWep;
+  if(wep==='infil')keep=Math.max(0.18,1-dist/70);
+  else if(wep==='vanguard')keep=Math.max(0.22,1-dist/85);
+  else if(bolt.cls==='spec')keep=Math.max(0.72,1-dist/380);
+  else if(bolt.cls==='heavy')keep=Math.max(0.48,1-dist/200);
+  else if(bolt.cls==='officer'||bolt.cls==='rocket')keep=Math.max(0.15,1-dist/55);
+  else if(bolt.cls==='commando')keep=Math.max(0.28,1-dist/95);
+  else keep=Math.max(0.30,1-dist/110); // assault rifle
   a*=keep;
   if(bolt.cls==='commando'&&dist<=34)a*=1.08; // short-range DC-17m stopping power; still under Heavy damage per shot
  }
@@ -2783,7 +2858,14 @@ function hitUnit(u,a,src,bolt,headshot){
   // Headshot damage gives a small bonus in addition to the normal damage-participation point.
   if(headshot){awardBattlePoints(src,2);popText('HEADSHOT','#ffd54a')}
  }
- u.hit=.15;u.hurtT=2.2;u.noDmg=0;if(u.isP&&S.shake)shk=Math.max(shk,.25);
+ u.hit=.15;u.hurtT=2.8;u.noDmg=0;if(u.isP&&S.shake)shk=Math.max(shk,.25);
+ // Being shot makes the unit notice the attacker and immediately prioritise returning fire.
+ if(src&&src.alive&&src.team!==u.team&&!u.isP){
+  u.target=src;
+  u.think=0; // force an immediate re-evaluate next botThink
+  u.pauseT=Math.min(u.pauseT||0,0.05); // cut any lingering pause so they can shoot back
+  u.aggroT=Math.max(u.aggroT||0,3.5); // stay locked on the shooter for a few seconds
+ }
  u.hp-=a;if(u.hp<=0&&u.alive)kill(u,src,!!headshot&&src===player);
 }
 function className(cls){return CLS[cls]?CLS[cls].n:'TROOPER'}
@@ -2797,6 +2879,8 @@ function updCorpses(dt){for(let i=corpses.length-1;i>=0;i--){const k=corpses[i];
 function kill(u,src,headshotKill=false){
  if(!u||!u.alive)return;
  awardKillAndAssists(u,src,headshotKill);
+ // Survivors of a life still earn a small consolation of battlepoints on death.
+ awardBattlePoints(u,18);
  u.alive=false;u.hp=0;u.cpOrder=null;u.cpGoal=null;u.cpOrderT=0;
  if(src){
   kills[src.team]++;
@@ -2810,18 +2894,9 @@ function kill(u,src,headshotKill=false){
 }
 function clearScopeOverlay(){document.body.classList.remove('scopeActive');$('scope').classList.remove('on');$('scopeHud').classList.remove('on')}
 function onPlayerDeath(src){
- // Rocket Trooper and Republic Commando purchases last for one life only.
- // On death, return the player to Assault; choosing a paid class again requires
- // another purchase from the remaining battlepoint balance.
- let paidClassExpired=false;
- if(player&&classBattlePointCost(player.cls)>0){
-  const expiredClass=player.cls;paidClassExpired=true;
-  pCls='assault';
-  switchUnitClass(player,'assault');
-  if(player.g)player.g.visible=false;
-  popText(expiredClass==='commando'?'COMMANDO CONTRACT EXPIRED':'ROCKET TROOPER CONTRACT EXPIRED','#ffcf66');
- }
- clearScopeOverlay();deathT=3;$('dtxt').textContent='Eliminated by '+(src?src.name:'unknown')+'.'+(paidClassExpired?' Your paid class has expired. Select CHANGE CLASS and purchase it again for your next life.':'');
+ // Paid classes (Rocket Trooper / Republic Commando) are no longer one-life contracts.
+ // Once purchased they remain active across deaths until the player voluntarily changes class.
+ clearScopeOverlay();deathT=3;$('dtxt').textContent='Eliminated by '+(src?src.name:'unknown')+'.';
  $('resp').disabled=true;$('chg').disabled=true;$('s-death').classList.add('on');
  fireHeld=false;if(document.pointerLockElement)document.exitPointerLock();
 }
@@ -3034,16 +3109,23 @@ function botThink(u,dt){
   return;
  }
  // All bots actively seek the closest living enemy, even before the opposing lines meet.
+ // Units that were recently shot stay locked onto their attacker (aggro) so they notice and return fire.
+ u.aggroT=Math.max(0,(u.aggroT||0)-dt);
  u.think-=dt;
  if(u.think<=0){
   u.think=rnd(.28,.42);
-  let best=null,bd=Infinity;
-  for(const e of units){
-   if(!e.alive||e.team===u.team)continue;
-   const d=Math.hypot(e.x-u.x,e.z-u.z);
-   if(d<bd){bd=d;best=e}
+  // Keep the current aggro target if still valid; otherwise pick nearest enemy.
+  if((u.aggroT||0)>0&&u.target&&u.target.alive&&u.target.team!==u.team){
+   // stay locked
+  }else{
+   let best=null,bd=Infinity;
+   for(const e of units){
+    if(!e.alive||e.team===u.team)continue;
+    const d=Math.hypot(e.x-u.x,e.z-u.z);
+    if(d<bd){bd=d;best=e}
+   }
+   u.target=best;
   }
-  u.target=best;
   // Cover: hurt, overheated, or just cautious bots duck behind a rock / crate / spire and peek out to shoot.
   if(!u.cov&&u.target&&u.covCd<=0&&!u.isP&&u.altWep!=='sentry'){
    const tt=u.target,dd=Math.hypot(tt.x-u.x,tt.z-u.z);
@@ -3120,21 +3202,34 @@ function botThink(u,dt){
   const dx=t.x-u.x,dz=t.z-u.z,d=Math.hypot(dx,dz)||1;
   bear=Math.atan2(-dx,-dz);
   u.losT=(u.losT||0)-dt;if(u.losT<=0){u.losT=.1;u.hasLos=losClear(u.x,u.z,t.x,t.z)}
-  const range=u.cls==='spec'?225:155;
+  const range=u.cls==='spec'?480:155;
   faceT=!!u.hasLos&&d<range;
   if(u.hasLos){
-   // Keep advancing while firing; ease off only at very close range to avoid piling up.
-   let forward=d>24?1:d>12?.68:d>8?.24:0;
+   // Specialists try to hold extreme long range and snipe; other classes push in.
+   let forward;
+   if(u.cls==='spec'){
+    // Prefer 220-320m; back away if closer, advance only if very far.
+    if(d>340)forward=0.85;
+    else if(d>260)forward=0.15;
+    else if(d>180)forward=-0.35;
+    else forward=-0.75;
+   }else{
+    // Keep advancing while firing; ease off only at very close range to avoid piling up.
+    forward=d>24?1:d>12?.68:d>8?.24:0;
+   }
    mx=dx/d*forward;mz=dz/d*forward;
    const strafe=.045;
-   if(d<135){mx+=dz/d*strafe*u.strafe;mz-=dx/d*strafe*u.strafe}
+   if(d<135||u.cls==='spec'){mx+=dz/d*strafe*u.strafe;mz-=dx/d*strafe*u.strafe}
   }else{
    // A rock, spire or cliff is in the way: walk AROUND it toward the enemy instead of pushing into it.
    const w=navPoint(u,t.x,t.z),wx=w.x-u.x,wz=w.z-u.z,wl=Math.hypot(wx,wz)||1;
    mx=wx/wl;mz=wz/wl;
   }
   // Only shoot once the bot has actually turned to face the target (and can see it).
-  if(faceT&&(!u.overheat||u.altWep==='rocketLauncher'||u.altWep==='antiArmor')&&u.fireCd<=0&&u.pauseT<=0&&Math.abs(angDiff(bear,u.yaw))<.14){
+  // Recently-hit (aggro) units are quicker to return fire and tolerate a slightly wider aim cone.
+  const aggro=!!((u.aggroT||0)>0||(u.hurtT||0)>0);
+  const aimCone=aggro?0.28:0.14;
+  if(faceT&&(!u.overheat||u.altWep==='rocketLauncher'||u.altWep==='antiArmor')&&u.fireCd<=0&&u.pauseT<=0&&Math.abs(angDiff(bear,u.yaw))<aimCone){
    // Identical aim spread for Republic and Separatist bots keeps the teams evenly matched.
    let sp=u.cls==='spec'?.0025+d*.000025:.006+d*.00005;
    // Rocket Troopers are deliberately harder to hit while flying, giving their jetpack time to matter.
@@ -3148,7 +3243,7 @@ function botThink(u,dt){
    fire(u,[ex/L,ey/L,ez/L]);
    u.burstN++;
    if(u.burstN>=(c.rate>5?3+(Math.random()*3|0):1+(Math.random()*2|0))){
-    u.burstN=0;u.pauseT=rnd(.45,.9);
+    u.burstN=0;u.pauseT=aggro?rnd(.18,.42):rnd(.45,.9);
    }
   }
  }else{
@@ -3380,15 +3475,15 @@ function gameUpdate(dt){
    else{
     u.respT-=dt;
     if(u.respT<=0){
-     // Paid bot classes expire on death too. Return to that bot's original
-     // free class before deciding whether it can afford a fresh paid spawn.
-     if(u.cls==='rocket'||u.cls==='commando')switchUnitClass(u,u.baseClass||'assault');
+     // Paid classes persist across deaths. Bots may still buy into a paid class if they have the points and are not already on one.
      let boughtPaidClass=false;
-     if(u.team===REP&&(u.battlePoints||0)>=COMMANDO_BATTLEPOINT_COST&&Math.random()<.12&&spendBattlePoints(u,COMMANDO_BATTLEPOINT_COST)){
-      switchUnitClass(u,'commando');boughtPaidClass=true;
-     }
-     if(!boughtPaidClass&&(u.battlePoints||0)>=ROCKET_BATTLEPOINT_COST&&Math.random()<.16&&spendBattlePoints(u,ROCKET_BATTLEPOINT_COST)){
-      switchUnitClass(u,'rocket');boughtPaidClass=true;
+     if(u.cls!=='commando'&&u.cls!=='rocket'){
+      if(u.team===REP&&(u.battlePoints||0)>=COMMANDO_BATTLEPOINT_COST&&Math.random()<.12&&spendBattlePoints(u,COMMANDO_BATTLEPOINT_COST)){
+       switchUnitClass(u,'commando');boughtPaidClass=true;
+      }
+      if(!boughtPaidClass&&(u.battlePoints||0)>=ROCKET_BATTLEPOINT_COST&&Math.random()<.16&&spendBattlePoints(u,ROCKET_BATTLEPOINT_COST)){
+       switchUnitClass(u,'rocket');boughtPaidClass=true;
+      }
      }
      spawnAt(u);
     }
@@ -4068,6 +4163,7 @@ function endCinematic(){
  units.forEach(u=>{u.g.visible=true;u.g.position.set(u.x,u.y,u.z);if(u.isP){u.yaw=u.team===REP?0:Math.PI;u.pitch=0}});
  playing=true;paused=false;matchT=matchLengthMinutes*60;kills=[0,0];matchClock=0;matchRewardsApplied=false;supScore={0:0,1:0};$('hud').classList.add('on');$('feed').innerHTML='';
  setupCommandPoints();
+ if(gameMode!=='supremacy')scatterTdmCrates();
  // Toggle supremacy UI
  const isSup=gameMode==='supremacy';
  const sb=$('supBars'),cr=$('cpRow'),sk=$('sK'),rk=$('rK'),ob=$('obj');
@@ -4145,10 +4241,38 @@ function setCPColor(cp,owner,localTeam){
  if(cp.lab)cp.lab.style.color=css;
 }
 
+function scatterTdmCrates(){
+ // Scatter industrial crates across the field in Team Deathmatch for extra cover.
+ const metal=new THREE.MeshLambertMaterial({color:0x656a6d}),edge=new THREE.MeshLambertMaterial({color:0x383d40}),topMat=new THREE.MeshLambertMaterial({color:0x777c7e}),dark=new THREE.MeshLambertMaterial({color:0x202629}),door=new THREE.MeshLambertMaterial({color:0x50575a});
+ const make=(x,z,w,d,h,rot)=>{
+  if(inLandingClearance(x,z,20)||(window._mygeetoRavine&&Math.abs(z)<MG_CH+18))return;
+  const g=new THREE.Group();
+  const body=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),metal);body.position.y=h/2;g.add(body);
+  const lower=new THREE.Mesh(new THREE.BoxGeometry(w+.08,.22,d+.08),edge);lower.position.y=.12;g.add(lower);
+  const cap=new THREE.Mesh(new THREE.BoxGeometry(w+.12,.16,d+.12),topMat);cap.position.y=h-.04;g.add(cap);
+  const ribCount=Math.max(3,Math.floor(w/.7));
+  for(let i=0;i<ribCount;i++){
+   const rib=new THREE.Mesh(new THREE.BoxGeometry(.13,.10,d+.08),edge);
+   rib.position.set(-w/2+.12+(w-.24)*i/Math.max(1,ribCount-1),h+.07,0);g.add(rib);
+  }
+  const panel=new THREE.Mesh(new THREE.BoxGeometry(w*.58,h*.62,.055),dark);panel.position.set(0,h*.52,d/2+.035);g.add(panel);
+  for(let j=0;j<6;j++){
+   const slat=new THREE.Mesh(new THREE.BoxGeometry(w*.55,.035,.07),door);slat.position.set(0,h*.28+j*h*.07,d/2+.075);g.add(slat);
+  }
+  g.position.set(x,gh(x,z),z);g.rotation.y=rot;scene.add(g);world.push(g);
+  obs.push({x,z,hx:w/2,hz:d/2,rot,crate:true});
+ };
+ const n=42;
+ for(let i=0;i<n;i++){
+  const x=rnd(-280,280),z=rnd(-300,300);
+  if(Math.abs(z)<40&&Math.abs(x)<40)continue; // leave mid a bit open
+  const w=rnd(1.8,3.6),d=rnd(1.4,2.4),h=rnd(1.3,2.1),rot=rnd(0,Math.PI*2);
+  make(x,z,w,d,h,rot);
+ }
+}
+
 function addCommandPostCrates(cp){
- // Keep the central A objective clear on every map so player and bot paths
- // can approach it from all directions without a crate ring blocking the point.
- if(cp.letter==='A')return;
+ // Crates surround every command post (including central A) for cover on all maps.
  const metal=new THREE.MeshLambertMaterial({color:0x656a6d}),edge=new THREE.MeshLambertMaterial({color:0x383d40}),topMat=new THREE.MeshLambertMaterial({color:0x777c7e}),dark=new THREE.MeshLambertMaterial({color:0x202629}),door=new THREE.MeshLambertMaterial({color:0x50575a});
  const make=(x,z,w,d,h,rot,small=false)=>{
   const g=new THREE.Group();
@@ -4173,10 +4297,12 @@ function addCommandPostCrates(cp){
   const hx=(w*c+d*si)/2,hz=(w*si+d*c)/2;
   obs.push({x,z,hx:w/2,hz:d/2,rot,crate:true});
  };
+ // Slightly tighter ring on central A so the capture zone stays walkable from all sides.
+ const scale=cp.letter==='A'?1.15:1;
  const placements=[
-  [ 0,-12,3.7,2.25,2.0,0], [ 0, 12,3.7,2.25,2.0,Math.PI],
-  [-13, 0,2.25,1.65,1.35,Math.PI/2], [13,0,2.25,1.65,1.35,-Math.PI/2],
-  [-10,-10,2.0,1.6,1.25,.25], [10,10,2.0,1.6,1.25,-.25]
+  [ 0,-12*scale,3.7,2.25,2.0,0], [ 0, 12*scale,3.7,2.25,2.0,Math.PI],
+  [-13*scale, 0,2.25,1.65,1.35,Math.PI/2], [13*scale,0,2.25,1.65,1.35,-Math.PI/2],
+  [-10*scale,-10*scale,2.0,1.6,1.25,.25], [10*scale,10*scale,2.0,1.6,1.25,-.25]
  ];
  placements.forEach(a=>make(cp.x+a[0],cp.z+a[1],a[2],a[3],a[4],a[5],a[4]<1.5));
 }
@@ -4771,19 +4897,19 @@ function showPrev(){if(pvU)ps.remove(pvU.g);pvU=soldier(pTeam,pCls);if(pvU.launc
 function buildClsList(){
  const L=$('clsList');L.innerHTML='';
  const bp=document.createElement('div');bp.className='sub';bp.style.cssText='font-size:12px;margin:0 0 8px;color:#9cd0ff;text-align:left';
- bp.textContent='BATTLEPOINTS: '+(player?(player.battlePoints||0):0)+' · PAID CLASSES LAST ONE LIFE';L.appendChild(bp);
+ bp.textContent='BATTLEPOINTS: '+(player?(player.battlePoints||0):0)+' · PAID CLASSES PERSIST UNTIL YOU CHANGE';L.appendChild(bp);
  CK.filter(k=>classAllowedForTeam(pTeam,k)).forEach(k=>{
   const c=CLS[k],b=document.createElement('button'),costValue=classBattlePointCost(k);
   const have=player?(Number(player.battlePoints)||0):0;
-  const activeThisLife=!!(player&&player.cls===k);
-  const locked=costValue>0&&!activeThisLife&&have<costValue;
+  const alreadyOwned=!!(player&&player.cls===k&&costValue>0);
+  const locked=costValue>0&&!alreadyOwned&&have<costValue;
   // Keep every team-available class clickable so players can inspect its model and stats.
   // Affordability is enforced only by the Deploy handler below.
   b.className='btn'+(k===pCls?' sel':'')+(locked?' unavailable-preview':'');
   b.disabled=false;
   b.title=locked?'Preview only — earn more battlepoints to deploy this class':'Preview '+c.n;
   b.style.cssText='display:block;min-width:290px;max-width:360px;text-align:left;margin:4px 0;padding:8px 13px;font-size:12px;letter-spacing:.08em;line-height:1.25;cursor:pointer';
-  const cost=costValue?(activeThisLife?'ACTIVE THIS LIFE':(locked?'PREVIEW ONLY · NEED '+(costValue-have)+' MORE BP':'COST '+costValue+' BP / LIFE')):'CLASS';
+  const cost=costValue?(alreadyOwned?'OWNED · PERSISTS ACROSS DEATHS':(locked?'PREVIEW ONLY · NEED '+(costValue-have)+' MORE BP':'COST '+costValue+' BP (keeps until change)')):'CLASS';
   b.innerHTML=`<b style="font-size:13px">${c.n}</b><br><small style="font-size:10px;letter-spacing:.025em;line-height:1.35">${cost} · HP ${c.hp} · SPEED ${c.spd}<br>${c.desc}</small>`;
   b.onclick=()=>{pCls=k;buildClsList();showPrev()};L.appendChild(b);
  });
